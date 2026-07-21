@@ -21,15 +21,13 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install fyers-apiv3 requests pyotp colorama
-
       - name: Run Sensex Pre-Market Script
         env:
           FYERS_CLIENT_ID: ${{ secrets.FYERS_CLIENT_ID }}
           FYERS_PIN: ${{ secrets.FYERS_PIN }}
           FYERS_TOTP_KEY: ${{ secrets.FYERS_TOTP_KEY }}
-          APP_ID: ${{ secrets.APP_ID }}
-          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          APP_ID: ${{ secrets.FYERS_APP_ID }}
+          SECRET_KEY: ${{ secrets.FYERS_SECRET_ID }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python sensex_premarket.py
-        
