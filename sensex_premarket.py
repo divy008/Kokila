@@ -141,22 +141,24 @@ def calculate_and_send_strategy(ticks):
     pm_low = min(ticks)
     pm_close = ticks[-1]
     
-    # Mean and Range
+    # 1. Mean and Range
     mean = (pm_high + pm_low + pm_close) / 3.0
     range_pm = pm_high - pm_low
     
-    # Standard Deviation Calculation
+    # 2. Dynamic SD Calculation & Certification Line
     if range_pm > 100:
         sigma = range_pm / 2.0
+        sd_cert = f"✅ *SD Basis:* Certified via Live Pre-Open Range ({range_pm:.2f} pts)"
     else:
         sigma = mean * 0.0033  # Standard Index Spread (~0.33%)
+        sd_cert = f"⚠️ *SD Basis:* Fallback Volatility Model (~0.33% / Flat Open)"
     
     p2sd = mean + (2 * sigma)
     p1sd = mean + (1 * sigma)
     m1sd = mean - (1 * sigma)
     m2sd = mean - (2 * sigma)
     
-    # Market Bias
+    # 3. Market Bias
     if range_pm > 0:
         range_pos = (mean - pm_low) / range_pm
         if range_pos > 0.65:
@@ -170,6 +172,7 @@ def calculate_and_send_strategy(ticks):
         
     structure = "⚡ HIGH VOLATILITY / EXPANSION" if range_pm > (mean * 0.008) else "✅ NORMAL RANGE (Standard Volatility)"
     
+    # 4. Formatted Message with Certification Line
     msg = f"""🚨 *BSE SENSEX MORNING TRADING PLAN* 🚨
 📅 *Date:* {datetime.datetime.now().strftime('%d-%m-%Y')}
 
@@ -186,9 +189,10 @@ def calculate_and_send_strategy(ticks):
 • *-1 SD (Lower Boundary):* `{m1sd:.2f}`
 • *-2 SD (Extreme Support):* `{m2sd:.2f}`
 
-🔍 *Market Environment:*
+🔍 *Market Environment & Verification:*
 • *Bias:* {bias}
 • *Structure:* {structure}
+• {sd_cert}
 
 ---
 
@@ -203,6 +207,7 @@ def calculate_and_send_strategy(ticks):
    • Wait for a pullback/retest of the broken level to confirm Support/Resistance before entry.
 """
     send_telegram_alert(msg)
+
 
 # ---------------------------------------------------------
 # ૪. WebSocket Data Stream & Main Execution
