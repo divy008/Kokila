@@ -27,7 +27,6 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 target_symbol = "BSE:SENSEX-INDEX"
 pre_market_ticks = []
 
-# Secrets ચકાસણી
 def validate_env_vars():
     missing = []
     if not CLIENT_ID: missing.append("FYERS_CLIENT_ID")
@@ -37,26 +36,26 @@ def validate_env_vars():
     if not SECRET_ID: missing.append("SECRET_KEY / FYERS_SECRET_ID")
     
     if missing:
-        print(f"{Fore.RED}[-] નીચેના Secrets મળ્યા નથી: {', '.join(missing)}{Style.RESET_ALL}")
-        sys.exit(1)
+        print(f"{Fore.RED}[-] Missing Secrets: {', '.join(missing)}{Style.RESET_ALL}")
+        os._exit(1)
 
 # ---------------------------------------------------------
-# ૨. Fyers Automated Login Logic (Internal)
+# ૨. Fyers Automated Login
 # ---------------------------------------------------------
 def get_automated_token():
     validate_env_vars()
-    print(f"{Fore.CYAN}[*] Fyers બેકગ્રાઉન્ડ લોગિન ઓટોમેશન શરૂ થઈ રહ્યું છે...{Style.RESET_ALL}")
+    print(f"{Fore.CYAN}[*] Fyers બેકગ્રાઉન્ડ લોગિન શરૂ થઈ રહ્યું છે...{Style.RESET_ALL}")
     try:
         session = requests.Session()
         b64_encode = lambda s: base64.b64encode(str(s).encode()).decode()
         
-        # Step 1: Send OTP request
+        # Step 1: Send OTP
         payload_otp = {"fy_id": b64_encode(CLIENT_ID), "app_id": "2"}
         res_otp = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json=payload_otp).json()
         request_key = res_otp.get("request_key") or res_otp.get("data", {}).get("request_key")
         if not request_key:
             print(f"{Fore.RED}[-] OTP Request Failed:{Style.RESET_ALL}", res_otp)
-            sys.exit(1)
+            os._exit(1)
             
         # Step 2: Verify TOTP
         time_remaining = 30 - (int(time.time()) % 30)
@@ -69,7 +68,7 @@ def get_automated_token():
         request_key_v2 = res_verify.get("request_key") or res_verify.get("data", {}).get("request_key")
         if not request_key_v2:
             print(f"{Fore.RED}[-] TOTP Verification Failed:{Style.RESET_ALL}", res_verify)
-            sys.exit(1)
+            os._exit(1)
             
         # Step 3: Verify PIN
         payload_pin = {
@@ -81,7 +80,7 @@ def get_automated_token():
         access_token_v2 = res_pin.get("data", {}).get("access_token") if isinstance(res_pin.get("data"), dict) else res_pin.get("access_token")
         if not access_token_v2:
             print(f"{Fore.RED}[-] PIN Verification Failed:{Style.RESET_ALL}", res_pin)
-            sys.exit(1)
+            os._exit(1)
             
         # Step 4: OAuth Token Generation
         app_session = fyersModel.SessionModel(
@@ -111,27 +110,27 @@ def get_automated_token():
             
         app_session.set_token(auth_code)
         token_response = app_session.generate_token()
-        print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ રહ્યું!{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
         return token_response.get("access_token")
         
     except Exception as err:
-        print(f"{Fore.RED}[-] લોગિન પ્રોસેસ ક્રેશ: {err}{Style.RESET_ALL}")
-        sys.exit(1)
+        print(f"{Fore.RED}[-] લોગિન ક્રેશ: {err}{Style.RESET_ALL}")
+        os._exit(1)
 
 # ---------------------------------------------------------
 # ૩. Telegram Alert & Strategy Calculations
 # ---------------------------------------------------------
 def send_telegram_alert(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print(f"{Fore.YELLOW}[!] Telegram Tokens નથી મળ્યા. સ્કીપ કરાય છે.{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}[!] Telegram Tokens નથી મળ્યા.{Style.RESET_ALL}")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
         requests.post(url, json=payload)
-        print(f"{Fore.GREEN}[+] Telegram માં સફળતાપૂર્વક મેસેજ મોકલાયો.{Style.RESET_ALL}")
+        print(f"{Fore.GREEN}[+] Telegram માં સક્સેસફુલ મેસેજ સેન્ડ થયો.{Style.RESET_ALL}")
     except Exception as e:
-        print(f"{Fore.RED}[-] Telegram Alert મોકલવામાં ભૂલ: {e}{Style.RESET_ALL}")
+        print(f"{Fore.RED}[-] Telegram Alert માં એરર: {e}{Style.RESET_ALL}")
 
 def calculate_and_send_strategy(ticks):
     if not ticks:
@@ -142,35 +141,66 @@ def calculate_and_send_strategy(ticks):
     pm_low = min(ticks)
     pm_close = ticks[-1]
     
-    # Normal Distribution (પ્રમાણ્ય વિતરણ)
+    # Mean and Range
     mean = (pm_high + pm_low + pm_close) / 3.0
     range_pm = pm_high - pm_low
-    sigma = range_pm / 2.0 if range_pm > 0 else 10.0
     
-    p3sd, m3sd = mean + (3 * sigma), mean - (3 * sigma)
-    p2sd, m2sd = mean + (2 * sigma), mean - (2 * sigma)
-    p1sd, m1sd = mean + (1 * sigma), mean - (1 * sigma)
+    # Standard Deviation Calculation
+    if range_pm > 100:
+        sigma = range_pm / 2.0
+    else:
+        sigma = mean * 0.0033  # Standard Index Spread (~0.33%)
     
-    msg = f"""📊 *BSE SENSEX PRE-MARKET STRATEGY*
-📅 Date: {datetime.datetime.now().strftime('%d-%m-%Y')}
+    p2sd = mean + (2 * sigma)
+    p1sd = mean + (1 * sigma)
+    m1sd = mean - (1 * sigma)
+    m2sd = mean - (2 * sigma)
+    
+    # Market Bias
+    if range_pm > 0:
+        range_pos = (mean - pm_low) / range_pm
+        if range_pos > 0.65:
+            bias = "🟢 BULLISH (Mean near Pre-Open High)"
+        elif range_pos < 0.35:
+            bias = "🔴 BEARISH (Mean near Pre-Open Low)"
+        else:
+            bias = "🟡 NEUTRAL / BALANCED"
+    else:
+        bias = "🟡 NEUTRAL / FLUSH OPEN"
+        
+    structure = "⚡ HIGH VOLATILITY / EXPANSION" if range_pm > (mean * 0.008) else "✅ NORMAL RANGE (Standard Volatility)"
+    
+    msg = f"""🚨 *BSE SENSEX MORNING TRADING PLAN* 🚨
+📅 *Date:* {datetime.datetime.now().strftime('%d-%m-%Y')}
 
-🔴 *Pre-Market Data (09:00 - 09:08)*
-• High: `{pm_high:.2f}`
-• Low: `{pm_low:.2f}`
-• Close: `{pm_close:.2f}`
+📊 *Key Pre-Open Levels:*
+• *Pre-Open High:* `{pm_high:.2f}`
+• *Pre-Open Low:* `{pm_low:.2f}`
+• *Pre-Open Mean:* `{mean:.2f}`
+• *Pre-Open Range:* `{range_pm:.2f} pts`
 
-📈 *Normal Distribution Levels (પ્રમાણ્ય વિતરણ)*
-• *+3SD (Breakout Target):* `{p3sd:.2f}`
-• *+2SD (Sell / Reversal):* `{p2sd:.2f}`
-• *+1SD (Upper Boundary):* `{p1sd:.2f}`
-• 🎯 *Mean (Pivot Zone):* `{mean:.2f}`
-• *-1SD (Lower Boundary):* `{m1sd:.2f}`
-• *-2SD (Buy / Reversal):* `{m2sd:.2f}`
-• *-3SD (Breakout Target):* `{m3sd:.2f}`
+📈 *Normal Distribution Zones (પ્રમાણ્ય વિતરણ):*
+• *+2 SD (Extreme Resistance):* `{p2sd:.2f}`
+• *+1 SD (Upper Boundary):* `{p1sd:.2f}`
+• *Mean (Pivot Zone):* `{mean:.2f}`
+• *-1 SD (Lower Boundary):* `{m1sd:.2f}`
+• *-2 SD (Extreme Support):* `{m2sd:.2f}`
 
-💡 *Today's Execution Plan:*
-- Look for **Mean Reversion** at -2SD (Buy) or +2SD (Sell) on 5-min candle confirmation.
-- **Breakout Trade** if 9:15 candle closes above +2SD or below -2SD.
+🔍 *Market Environment:*
+• *Bias:* {bias}
+• *Structure:* {structure}
+
+---
+
+💡 *EXECUTION PLAYBOOK (09:15 AM)*
+
+1️⃣ *Reversal Setup (Mean Reversion):*
+   • *SHORT / PUT:* Price reaches `{p1sd:.2f}` or `{p2sd:.2f}` AND forms a 5-min Bearish Rejection Candle (Shooting Star / Engulfing).
+   • *LONG / CALL:* Price reaches `{m1sd:.2f}` or `{m2sd:.2f}` AND forms a 5-min Bullish Rejection Candle (Hammer / Engulfing).
+
+2️⃣ *Breakout / Trap Setup:*
+   • If price breaks `{pm_high:.2f}` or `{pm_low:.2f}` on the first 5-min candle, **DO NOT ENTER IMMEDIATELY**.
+   • Wait for a pullback/retest of the broken level to confirm Support/Resistance before entry.
 """
     send_telegram_alert(msg)
 
@@ -193,9 +223,10 @@ def on_message(message):
 
 def on_error(msg): pass
 def on_close(msg): pass
+
 def on_open():
     fyers_ws.subscribe(symbols=[target_symbol], data_type="SymbolUpdate")
-    fyers_ws.keep_running()
+    # પૂર્વે રહેલો keep_running હટાવી દીધો છે
 
 if __name__ == "__main__":
     access_token = get_automated_token()
@@ -205,7 +236,7 @@ if __name__ == "__main__":
         access_token=ws_access_token,
         log_path="",
         write_to_file=False,
-        reconnect=True,
+        reconnect=False,
         on_connect=on_open,
         on_close=on_close,
         on_error=on_error,
@@ -215,15 +246,22 @@ if __name__ == "__main__":
     fyers_ws.connect()
     print(f"{Fore.CYAN}[*] Sensex Pre-market Ticks કેપ્ચર થઈ રહ્યા છે... (8.5 મિનિટ માટે){Style.RESET_ALL}")
 
-    # 510 સેકન્ડ (8.5 મિનિટ) માટે રન થશે (અંદાજે 09:08:30 સુધી)
+    # 510 સેકન્ડ (8.5 મિનિટ) માટે રન થશે
     start_time = time.time()
     while time.time() - start_time < 510:
         time.sleep(1)
 
-    fyers_ws.close_connection()
-    print(f"{Fore.GREEN}[+] Pre-market સેશન સમાપ્ત. Ticks captured: {len(pre_market_ticks)}{Style.RESET_ALL}")
+    # Clean disconnection
+    try:
+        fyers_ws.close_connection()
+    except Exception:
+        pass
+
+    print(f"{Fore.GREEN}[+] Pre-market સેશન પૂરૂં. Ticks captured: {len(pre_market_ticks)}{Style.RESET_ALL}")
     
-    # ગણતરી કરીને Telegram પર મોકલો
+    # Telegram Alert મોકલો
     calculate_and_send_strategy(pre_market_ticks)
-    sys.exit(0)
-  
+    
+    # Force Exit Process (ઝડપી કલોઝિંગ)
+    print(f"{Fore.GREEN}[+] Process complete. Force exiting...{Style.RESET_ALL}")
+    os._exit(0)
