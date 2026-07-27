@@ -5,6 +5,7 @@ import datetime
 import requests
 import pyotp
 import base64
+import numpy as np
 from colorama import Fore, Style, init
 from urllib.parse import urlparse, parse_qs
 from fyers_apiv3 import fyersModel
@@ -26,6 +27,7 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
 target_symbol = "BSE:SENSEX-INDEX"
 pre_market_ticks = []
+open_price_900 = None  # Stores the 09:00:01 AM Open Tick
 
 def validate_env_vars():
     missing = []
@@ -34,7 +36,7 @@ def validate_env_vars():
     if not TOTP_KEY: missing.append("FYERS_TOTP_KEY")
     if not APP_ID: missing.append("APP_ID / FYERS_APP_ID")
     if not SECRET_ID: missing.append("SECRET_KEY / FYERS_SECRET_ID")
-    
+
     if missing:
         print(f"{Fore.RED}[-] Missing Secrets: {', '.join(missing)}{Style.RESET_ALL}")
         os._exit(1)
@@ -48,7 +50,7 @@ def get_automated_token():
     try:
         session = requests.Session()
         b64_encode = lambda s: base64.b64encode(str(s).encode()).decode()
-        
+
         # Step 1: Send OTP
         payload_otp = {"fy_id": b64_encode(CLIENT_ID), "app_id": "2"}
         res_otp = session.post("https://api-t2.fyers.in/vagator/v2/send_login_otp_v2", json=payload_otp).json()
@@ -56,12 +58,12 @@ def get_automated_token():
         if not request_key:
             print(f"{Fore.RED}[-] OTP Request Failed:{Style.RESET_ALL}", res_otp)
             os._exit(1)
-            
+
         # Step 2: Verify TOTP
         time_remaining = 30 - (int(time.time()) % 30)
         if time_remaining < 4:
             time.sleep(time_remaining + 1)
-            
+
         totp_code = pyotp.TOTP(TOTP_KEY).now()
         payload_verify = {"request_key": request_key, "otp": totp_code}
         res_verify = session.post("https://api-t2.fyers.in/vagator/v2/verify_otp", json=payload_verify).json()
@@ -69,7 +71,7 @@ def get_automated_token():
         if not request_key_v2:
             print(f"{Fore.RED}[-] TOTP Verification Failed:{Style.RESET_ALL}", res_verify)
             os._exit(1)
-            
+
         # Step 3: Verify PIN
         payload_pin = {
             "request_key": request_key_v2, 
@@ -81,7 +83,7 @@ def get_automated_token():
         if not access_token_v2:
             print(f"{Fore.RED}[-] PIN Verification Failed:{Style.RESET_ALL}", res_pin)
             os._exit(1)
-            
+
         # Step 4: OAuth Token Generation
         app_session = fyersModel.SessionModel(
             client_id=APP_ID, secret_key=SECRET_ID, redirect_uri=REDIRECT_URI, 
@@ -101,18 +103,18 @@ def get_automated_token():
             "create_cookie": True
         }
         res_oauth = session.post("https://api-t1.fyers.in/api/v3/token", json=payload_oauth, headers=headers).json()
-        
+
         if res_oauth.get("s") == "ok" and "data" in res_oauth and "auth" in res_oauth["data"]:
             auth_code = res_oauth["data"]["auth"]
         else:
             redirect_target = res_oauth.get("Url") or res_oauth.get("data", {}).get("Url")
             auth_code = parse_qs(urlparse(redirect_target).query).get("auth_code", [""])[0]
-            
+
         app_session.set_token(auth_code)
         token_response = app_session.generate_token()
         print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
         return token_response.get("access_token")
-        
+
     except Exception as err:
         print(f"{Fore.RED}[-] લોગિન ક્રેશ: {err}{Style.RESET_ALL}")
         os._exit(1)
@@ -136,84 +138,101 @@ def calculate_and_send_strategy(ticks):
     if not ticks:
         send_telegram_alert("⚠️ *BSE Sensex Alert*: Pre-market ticks capture થતા નથી!")
         return
+
+    # Extract Explicit 09:00:01 Open & Session Closing Price
+    open_price = open_price_900 if open_price_900 else ticks[0]
+    close_price = ticks[-1]  # Final tick before disconnect (Pre-Open Settlement Close)
+
+    abs_high = max(ticks)
+    abs_low = min(ticks)
+
+    # 1. Trimming Spikes (5% & 95% percentile bounds)
+    p_high = float(np.percentile(ticks, 95))
+    p_low  = float(np.percentile(ticks, 5))
     
-    pm_high = max(ticks)
-    pm_low = min(ticks)
-    pm_close = ticks[-1]
-    
-    # 1. Mean and Range
-    mean = (pm_high + pm_low + pm_close) / 3.0
-    range_pm = pm_high - pm_low
-    
-    # 2. Dynamic SD Calculation & Certification Line
-    if range_pm > 100:
-        sigma = range_pm / 2.0
-        sd_cert = f"✅ *SD Basis:* Certified via Live Pre-Open Range ({range_pm:.2f} pts)"
-    else:
-        sigma = mean * 0.0033  # Standard Index Spread (~0.33%)
-        sd_cert = f"⚠️ *SD Basis:* Fallback Volatility Model (~0.33% / Flat Open)"
-    
-    p2sd = mean + (2 * sigma)
-    p1sd = mean + (1 * sigma)
-    m1sd = mean - (1 * sigma)
-    m2sd = mean - (2 * sigma)
-    
-    # 3. Market Bias
-    if range_pm > 0:
-        range_pos = (mean - pm_low) / range_pm
-        if range_pos > 0.65:
+    filtered_ticks = [t for t in ticks if p_low <= t <= p_high]
+    if not filtered_ticks:
+        filtered_ticks = ticks
+
+    # 2. Mean & True Standard Deviation Calculation
+    mean = float(np.mean(filtered_ticks))
+    std_dev = float(np.std(filtered_ticks))
+
+    if std_dev < (mean * 0.001):
+        std_dev = mean * 0.0015
+
+    # 3. SD Distribution Zones
+    u1sd = round(mean + std_dev, 2)
+    l1sd = round(mean - std_dev, 2)
+    u2sd = round(mean + (2 * std_dev), 2)
+    l2sd = round(mean - (2 * std_dev), 2)
+
+    # 4. Core Sub-Pivots
+    high_mid = round((p_high + mean) / 2.0, 2)
+    low_mid  = round((mean + p_low) / 2.0, 2)
+    range_span = round(p_high - p_low, 2)
+
+    # 5. Market Bias Determination
+    if range_span > 0:
+        mean_pos = (mean - p_low) / range_span
+        if mean_pos >= 0.65:
             bias = "🟢 BULLISH (Mean near Pre-Open High)"
-        elif range_pos < 0.35:
+        elif mean_pos <= 0.35:
             bias = "🔴 BEARISH (Mean near Pre-Open Low)"
         else:
-            bias = "🟡 NEUTRAL / BALANCED"
+            bias = "🟡 NEUTRAL (Balanced Range)"
     else:
         bias = "🟡 NEUTRAL / FLUSH OPEN"
-        
-    structure = "⚡ HIGH VOLATILITY / EXPANSION" if range_pm > (mean * 0.008) else "✅ NORMAL RANGE (Standard Volatility)"
-    
-    # 4. Formatted Message with Certification Line
+
+    spread_pct = (range_span / mean) * 100
+    trap_risk = "⚠️ HIGH TRAP RISK (Narrow Range)" if spread_pct < 0.25 else "✅ NORMAL RANGE (Standard Volatility)"
+
+    # 6. Formatted Telegram Message
     msg = f"""🚨 *BSE SENSEX MORNING TRADING PLAN* 🚨
 📅 *Date:* {datetime.datetime.now().strftime('%d-%m-%Y')}
 
-📊 *Key Pre-Open Levels:*
-• *Pre-Open High:* `{pm_high:.2f}`
-• *Pre-Open Low:* `{pm_low:.2f}`
+⏰ *Pre-Market Executed Prices:*
+• *09:00:01 AM Open:* `{open_price:.2f}`
+• *Pre-Open Close:* `{close_price:.2f}`
+
+📊 *Key Pre-Open Levels (Spike Filtered):*
+• *Core High (95th %):* `{p_high:.2f}` _(Abs Max: {abs_high:.2f})_
+• *Upper Mid (H-Pivot):* `{high_mid:.2f}`
 • *Pre-Open Mean:* `{mean:.2f}`
-• *Pre-Open Range:* `{range_pm:.2f} pts`
+• *Lower Mid (L-Pivot):* `{low_mid:.2f}`
+• *Core Low (5th %):* `{p_low:.2f}` _(Abs Min: {abs_low:.2f})_
+• *Pre-Open Range:* `{range_span:.2f} pts`
 
-📈 *Normal Distribution Zones (પ્રમાણ્ય વિતરણ):*
-• *+2 SD (Extreme Resistance):* `{p2sd:.2f}`
-• *+1 SD (Upper Boundary):* `{p1sd:.2f}`
+📈 *Normal Distribution Zones (True SD: {std_dev:.2f} pts):*
+• *+2 SD (Extreme Resistance):* `{u2sd:.2f}`
+• *+1 SD (Upper Boundary):* `{u1sd:.2f}`
 • *Mean (Pivot Zone):* `{mean:.2f}`
-• *-1 SD (Lower Boundary):* `{m1sd:.2f}`
-• *-2 SD (Extreme Support):* `{m2sd:.2f}`
+• *-1 SD (Lower Boundary):* `{l1sd:.2f}`
+• *-2 SD (Extreme Support):* `{l2sd:.2f}`
 
-🔍 *Market Environment & Verification:*
+🔍 *Market Environment:*
 • *Bias:* {bias}
-• *Structure:* {structure}
-• {sd_cert}
+• *Structure:* {trap_risk}
 
 ---
 
 💡 *EXECUTION PLAYBOOK (09:15 AM)*
 
 1️⃣ *Reversal Setup (Mean Reversion):*
-   • *SHORT / PUT:* Price reaches `{p1sd:.2f}` or `{p2sd:.2f}` AND forms a 5-min Bearish Rejection Candle (Shooting Star / Engulfing).
-   • *LONG / CALL:* Price reaches `{m1sd:.2f}` or `{m2sd:.2f}` AND forms a 5-min Bullish Rejection Candle (Hammer / Engulfing).
+   • *SHORT / PUT:* Price reaches `{u1sd:.2f}` or `{u2sd:.2f}` AND forms a 5-min Bearish Rejection Candle.
+   • *LONG / CALL:* Price reaches `{l1sd:.2f}` or `{l2sd:.2f}` AND forms a 5-min Bullish Rejection Candle.
 
 2️⃣ *Breakout / Trap Setup:*
-   • If price breaks `{pm_high:.2f}` or `{pm_low:.2f}` on the first 5-min candle, **DO NOT ENTER IMMEDIATELY**.
-   • Wait for a pullback/retest of the broken level to confirm Support/Resistance before entry.
+   • If price breaks `{p_high:.2f}` or `{p_low:.2f}` on the first 5-min candle, **DO NOT ENTER IMMEDIATELY**.
+   • Wait for a pullback/retest of the broken level to confirm Support/Resistance.
 """
     send_telegram_alert(msg)
-
 
 # ---------------------------------------------------------
 # ૪. WebSocket Data Stream & Main Execution
 # ---------------------------------------------------------
 def on_message(message):
-    global pre_market_ticks
+    global pre_market_ticks, open_price_900
     ltp = None
     if isinstance(message, dict) and message.get("symbol") == target_symbol:
         ltp = message.get("ltp") or message.get("lp")
@@ -224,6 +243,9 @@ def on_message(message):
                 break
 
     if ltp and ltp > 0:
+        # Capture 09:00:01 AM Open Tick on first arrival
+        if open_price_900 is None:
+            open_price_900 = ltp
         pre_market_ticks.append(ltp)
 
 def on_error(msg): pass
@@ -231,7 +253,6 @@ def on_close(msg): pass
 
 def on_open():
     fyers_ws.subscribe(symbols=[target_symbol], data_type="SymbolUpdate")
-    # પૂર્વે રહેલો keep_running હટાવી દીધો છે
 
 if __name__ == "__main__":
     access_token = get_automated_token()
@@ -251,22 +272,18 @@ if __name__ == "__main__":
     fyers_ws.connect()
     print(f"{Fore.CYAN}[*] Sensex Pre-market Ticks કેપ્ચર થઈ રહ્યા છે... (8.5 મિનિટ માટે){Style.RESET_ALL}")
 
-    # 510 સેકન્ડ (8.5 મિનિટ) માટે રન થશે
     start_time = time.time()
     while time.time() - start_time < 510:
         time.sleep(1)
 
-    # Clean disconnection
     try:
         fyers_ws.close_connection()
     except Exception:
         pass
 
     print(f"{Fore.GREEN}[+] Pre-market સેશન પૂરૂં. Ticks captured: {len(pre_market_ticks)}{Style.RESET_ALL}")
-    
-    # Telegram Alert મોકલો
+
     calculate_and_send_strategy(pre_market_ticks)
-    
-    # Force Exit Process (ઝડપી કલોઝિંગ)
+
     print(f"{Fore.GREEN}[+] Process complete. Force exiting...{Style.RESET_ALL}")
     os._exit(0)
