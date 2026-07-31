@@ -19,9 +19,9 @@ init(autoreset=True)
 CLIENT_ID          = os.getenv("FYERS_CLIENT_ID")
 USER_PIN           = os.getenv("FYERS_PIN")
 TOTP_KEY           = os.getenv("FYERS_TOTP_KEY")
-APP_ID             = os.getenv("APP_ID") or os.getenv("FYERS_APP_ID")
-SECRET_ID          = os.getenv("SECRET_KEY") or os.getenv("FYERS_SECRET_ID")
-REDIRECT_URI       = os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/default-redirect")
+APP_ID             = os.getenv("FYERS_APP_ID") or os.getenv("APP_ID")
+SECRET_ID          = os.getenv("FYERS_SECRET_ID") or os.getenv("SECRET_KEY")
+REDIRECT_URI       = os.getenv("FYERS_REDIRECT_URI", "https://trade.fyers.in/api-login/redirect-uri/index.html")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -34,15 +34,15 @@ def validate_env_vars():
     if not CLIENT_ID: missing.append("FYERS_CLIENT_ID")
     if not USER_PIN: missing.append("FYERS_PIN")
     if not TOTP_KEY: missing.append("FYERS_TOTP_KEY")
-    if not APP_ID: missing.append("APP_ID / FYERS_APP_ID")
-    if not SECRET_ID: missing.append("SECRET_KEY / FYERS_SECRET_ID")
+    if not APP_ID: missing.append("FYERS_APP_ID")
+    if not SECRET_ID: missing.append("FYERS_SECRET_ID")
 
     if missing:
         print(f"{Fore.RED}[-] Missing Secrets: {', '.join(missing)}{Style.RESET_ALL}")
         os._exit(1)
 
 # ---------------------------------------------------------
-# ૨. Fyers Automated Login
+# ૨. Fixed Fyers Automated Login
 # ---------------------------------------------------------
 def get_automated_token():
     validate_env_vars()
@@ -79,20 +79,17 @@ def get_automated_token():
             "identifier": b64_encode(USER_PIN)
         }
         res_pin = session.post("https://api-t2.fyers.in/vagator/v2/verify_pin_v2", json=payload_pin).json()
-        access_token_v2 = res_pin.get("data", {}).get("access_token") if isinstance(res_pin.get("data"), dict) else res_pin.get("access_token")
+        access_token_v2 = res_pin.get("data", {}).get("token") or res_pin.get("data", {}).get("access_token")
         if not access_token_v2:
             print(f"{Fore.RED}[-] PIN Verification Failed:{Style.RESET_ALL}", res_pin)
             os._exit(1)
 
-        # Step 4: OAuth Token Generation
-        app_session = fyersModel.SessionModel(
-            client_id=APP_ID, secret_key=SECRET_ID, redirect_uri=REDIRECT_URI, 
-            response_type="code", grant_type="authorization_code"
-        )
+        # Step 4: OAuth Token Generation Direct Access Token Extraction
+        clean_app_id = APP_ID.split("-")[0] if "-" in APP_ID else APP_ID
         headers = {"Authorization": f"Bearer {access_token_v2}", "Content-Type": "application/json"}
         payload_oauth = {
             "fyers_id": CLIENT_ID,
-            "app_id": APP_ID.split("-")[0] if "-" in APP_ID else APP_ID,
+            "app_id": clean_app_id,
             "redirect_uri": REDIRECT_URI,
             "appType": "100",
             "code_challenge": "",
@@ -104,16 +101,15 @@ def get_automated_token():
         }
         res_oauth = session.post("https://api-t1.fyers.in/api/v3/token", json=payload_oauth, headers=headers).json()
 
-        if res_oauth.get("s") == "ok" and "data" in res_oauth and "auth" in res_oauth["data"]:
-            auth_code = res_oauth["data"]["auth"]
-        else:
-            redirect_target = res_oauth.get("Url") or res_oauth.get("data", {}).get("Url")
-            auth_code = parse_qs(urlparse(redirect_target).query).get("auth_code", [""])[0]
+        # Extract direct access token
+        access_token = res_oauth.get("data", {}).get("auth") or res_oauth.get("access_token")
 
-        app_session.set_token(auth_code)
-        token_response = app_session.generate_token()
-        print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
-        return token_response.get("access_token")
+        if access_token:
+            print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
+            return access_token
+
+        print(f"{Fore.RED}[-] Token extraction failed:{Style.RESET_ALL}", res_oauth)
+        os._exit(1)
 
     except Exception as err:
         print(f"{Fore.RED}[-] લોગિન ક્રેશ: {err}{Style.RESET_ALL}")
@@ -141,7 +137,7 @@ def calculate_and_send_strategy(ticks):
 
     # Extract Explicit 09:00:01 Open & Session Closing Price
     open_price = open_price_900 if open_price_900 else ticks[0]
-    close_price = ticks[-1]  # Final tick before disconnect (Pre-Open Settlement Close)
+    close_price = ticks[-1]  # Final tick before disconnect
 
     abs_high = max(ticks)
     abs_low = min(ticks)
@@ -149,7 +145,7 @@ def calculate_and_send_strategy(ticks):
     # 1. Trimming Spikes (5% & 95% percentile bounds)
     p_high = float(np.percentile(ticks, 95))
     p_low  = float(np.percentile(ticks, 5))
-    
+
     filtered_ticks = [t for t in ticks if p_low <= t <= p_high]
     if not filtered_ticks:
         filtered_ticks = ticks
@@ -243,7 +239,6 @@ def on_message(message):
                 break
 
     if ltp and ltp > 0:
-        # Capture 09:00:01 AM Open Tick on first arrival
         if open_price_900 is None:
             open_price_900 = ltp
         pre_market_ticks.append(ltp)
