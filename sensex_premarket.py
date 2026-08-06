@@ -84,7 +84,7 @@ def get_automated_token():
             print(f"{Fore.RED}[-] PIN Verification Failed:{Style.RESET_ALL}", res_pin)
             os._exit(1)
 
-        # Step 4: OAuth Token Generation Direct Access Token Extraction
+        # Step 4: OAuth Token Generation & Auth Code Extraction
         clean_app_id = APP_ID.split("-")[0] if "-" in APP_ID else APP_ID
         headers = {"Authorization": f"Bearer {access_token_v2}", "Content-Type": "application/json"}
         payload_oauth = {
@@ -101,12 +101,31 @@ def get_automated_token():
         }
         res_oauth = session.post("https://api-t1.fyers.in/api/v3/token", json=payload_oauth, headers=headers).json()
 
-        # Extract direct access token
-        access_token = res_oauth.get("data", {}).get("auth") or res_oauth.get("access_token")
+        # Extract redirect URL containing auth_code
+        redirect_url = res_oauth.get("Url")
+        if redirect_url:
+            parsed_url = urlparse(redirect_url)
+            query_params = parse_qs(parsed_url.query)
+            auth_code_list = query_params.get("auth_code")
 
-        if access_token:
-            print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
-            return access_token
+            if auth_code_list:
+                auth_code = auth_code_list[0]
+
+                # Step 5: Exchange auth_code for final access_token using Fyers SessionModel
+                session_model = fyersModel.SessionModel(
+                    client_id=clean_app_id,
+                    secret_key=SECRET_ID,
+                    redirect_uri=REDIRECT_URI,
+                    response_type="code",
+                    grant_type="authorization_code"
+                )
+                session_model.set_token(auth_code)
+                token_response = session_model.generate_token()
+
+                access_token = token_response.get("access_token")
+                if access_token:
+                    print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
+                    return access_token
 
         print(f"{Fore.RED}[-] Token extraction failed:{Style.RESET_ALL}", res_oauth)
         os._exit(1)
@@ -135,14 +154,12 @@ def calculate_and_send_strategy(ticks):
         send_telegram_alert("⚠️ *BSE Sensex Alert*: Pre-market ticks capture થતા નથી!")
         return
 
-    # Extract Explicit 09:00:01 Open & Session Closing Price
     open_price = open_price_900 if open_price_900 else ticks[0]
-    close_price = ticks[-1]  # Final tick before disconnect
+    close_price = ticks[-1]  
 
     abs_high = max(ticks)
     abs_low = min(ticks)
 
-    # 1. Trimming Spikes (5% & 95% percentile bounds)
     p_high = float(np.percentile(ticks, 95))
     p_low  = float(np.percentile(ticks, 5))
 
@@ -150,25 +167,21 @@ def calculate_and_send_strategy(ticks):
     if not filtered_ticks:
         filtered_ticks = ticks
 
-    # 2. Mean & True Standard Deviation Calculation
     mean = float(np.mean(filtered_ticks))
     std_dev = float(np.std(filtered_ticks))
 
     if std_dev < (mean * 0.001):
         std_dev = mean * 0.0015
 
-    # 3. SD Distribution Zones
     u1sd = round(mean + std_dev, 2)
     l1sd = round(mean - std_dev, 2)
     u2sd = round(mean + (2 * std_dev), 2)
     l2sd = round(mean - (2 * std_dev), 2)
 
-    # 4. Core Sub-Pivots
     high_mid = round((p_high + mean) / 2.0, 2)
     low_mid  = round((mean + p_low) / 2.0, 2)
     range_span = round(p_high - p_low, 2)
 
-    # 5. Market Bias Determination
     if range_span > 0:
         mean_pos = (mean - p_low) / range_span
         if mean_pos >= 0.65:
@@ -183,7 +196,6 @@ def calculate_and_send_strategy(ticks):
     spread_pct = (range_span / mean) * 100
     trap_risk = "⚠️ HIGH TRAP RISK (Narrow Range)" if spread_pct < 0.25 else "✅ NORMAL RANGE (Standard Volatility)"
 
-    # 6. Formatted Telegram Message
     msg = f"""🚨 *BSE SENSEX MORNING TRADING PLAN* 🚨
 📅 *Date:* {datetime.datetime.now().strftime('%d-%m-%Y')}
 
