@@ -100,6 +100,7 @@ def get_automated_token():
             "create_cookie": True
         }
         res_oauth = session.post("https://api-t1.fyers.in/api/v3/token", json=payload_oauth, headers=headers).json()
+        print(f"{Fore.YELLOW}[*] OAuth Response Received:{Style.RESET_ALL}", res_oauth)
 
         # Extract redirect URL containing auth_code
         redirect_url = res_oauth.get("Url")
@@ -113,7 +114,7 @@ def get_automated_token():
 
                 # Step 5: Exchange auth_code for final access_token using Fyers SessionModel
                 session_model = fyersModel.SessionModel(
-                    client_id=clean_app_id,
+                    client_id=APP_ID,  # Full App ID with type e.g., 'ABCDE-100'
                     secret_key=SECRET_ID,
                     redirect_uri=REDIRECT_URI,
                     response_type="code",
@@ -121,13 +122,17 @@ def get_automated_token():
                 )
                 session_model.set_token(auth_code)
                 token_response = session_model.generate_token()
+                print(f"{Fore.YELLOW}[*] Token Generation Response:{Style.RESET_ALL}", token_response)
 
                 access_token = token_response.get("access_token")
                 if access_token:
                     print(f"{Fore.GREEN}[+] Fyers ઓટો-લોગિન સફળ!{Style.RESET_ALL}")
                     return access_token
+                else:
+                    print(f"{Fore.RED}[-] Access Token missing in response!{Style.RESET_ALL}")
+                    os._exit(1)
 
-        print(f"{Fore.RED}[-] Token extraction failed:{Style.RESET_ALL}", res_oauth)
+        print(f"{Fore.RED}[-] Redirect URL extraction failed:{Style.RESET_ALL}", res_oauth)
         os._exit(1)
 
     except Exception as err:
